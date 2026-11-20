@@ -80,6 +80,7 @@ self.onmessage = ({ data: file }) => {
 };
 
 // Node: a path (closed on free()) or an fd you opened (you close it)
+// works with import and require
 const wb = LazyWorkbook.open("big.xlsx");
 ```
 
@@ -200,7 +201,7 @@ Writer errors have a `code` too: `INVALID_INPUT` (a value xlsx can't store, like
 | | |
 |---|---|
 | `Workbook.open(data: Uint8Array \| ArrayBuffer)` | Parse a workbook or CSV. The format is detected from the bytes. |
-| `LazyWorkbook.open(file: Blob \| string \| number)` | Same, reading the file in pieces: a `Blob`/`File` in a Web Worker, or a path or fd in Node. ESM only. |
+| `LazyWorkbook.open(file: Blob \| string \| number)` | Same, reading the file in pieces: a `Blob`/`File` in a Web Worker, or a path or fd in Node (import or require). |
 | `Workbook.openSource({ size, readAt })` | Same, from your own `readAt(offset, length) => Uint8Array \| ArrayBuffer`, which must be synchronous. |
 | `wb.sheets(): SheetInfo[]` | Worksheets in order: `{ name, visibility: "Visible" \| "Hidden" \| "VeryHidden" }`. Chart sheets are skipped. |
 | `wb.sheet(name, { onProgress? }): Sheet` | Parse one worksheet. |
@@ -311,6 +312,7 @@ Step-by-step fixes for Vite, Amplify, nginx, S3/CloudFront, Netlify and Vercel: 
 - The writer writes xlsx only. No charts, images, comments, hyperlinks or rich text yet. Tables always start in column A, and data bars use Excel's older gradient style.
 - `sheet()` and `rows()` hold the whole sheet in memory. Use `iterRows()` or `forEachRow()` for huge sheets.
 - `LazyWorkbook` reads from the file while you use the workbook. Don't change the file until you `free()` it.
+- `free()` on a `LazyWorkbook` opened from a path closes the file right away, so an `iterRows()` still running on it throws `READ_FAILED` at its next row. Finish or `break` out of iterators before calling `free()`. If you never call `free()`, the file is closed once the workbook and its iterators are garbage collected; calling `free()` is still better, since that can take a while.
 - WebAssembly memory is capped at 4 GB per instance and never shrinks. In practice, about 500 MB xlsx files are the ceiling in a browser tab.
 - `iterRows()` borrows the parsed workbook until it finishes or you `break` out of it. Other calls made in the meantime still work, but they parse the file again, which is slow on big files. Finish or break out of one iterator before using the workbook again.
 - Streamed rows (`iterRows()`, `forEachRow()`) are padded to the widest row seen so far, starting from the size the sheet declares. If a file declares its size wrongly, the first rows can be narrower than in `sheet().rows()`.
