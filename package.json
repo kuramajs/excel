@@ -1,6 +1,6 @@
 {
   "name": "@kuramajs/excel",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Fast, low-memory Excel reader (xlsx, xlsm, xlsb, xls, ods, csv) and streaming xlsx writer for browsers and Node, in WebAssembly",
   "keywords": [
     "excel",
@@ -37,7 +37,7 @@
   "engines": {
     "node": ">=20"
   },
-  "main": "pkg/nodejs/nodejs_index.js",
+  "main": "js/node.cjs",
   "module": "js/web.mjs",
   "types": "pkg/web/web_index.d.ts",
   "exports": {
@@ -45,7 +45,7 @@
       "types": "./pkg/web/web_index.d.ts",
       "node": {
         "import": "./js/node.mjs",
-        "require": "./pkg/nodejs/nodejs_index.js"
+        "require": "./js/node.cjs"
       },
       "default": "./js/web.mjs"
     },

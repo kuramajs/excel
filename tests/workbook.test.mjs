@@ -262,6 +262,10 @@ test("CommonJS require exposes the same API", () => {
   const cjs = createRequire(import.meta.url)("@kuramajs/excel");
   const wb = cjs.Workbook.open(bytes);
   assert.equal(wb.sheets().length, 4);
+  assert.deepEqual(Object.keys(cjs).sort(), ["LazyWorkbook", "RowIter", "Sheet", "Workbook"]);
+  const lazy = cjs.LazyWorkbook.open(new URL("./fixtures/basic.xlsx", import.meta.url).pathname);
+  assert.deepEqual(lazy.sheet("Data").rows(), wb.sheet("Data").rows());
+  lazy.free();
 });
 
 // Everything a caller can read from a workbook, for comparing lazy against in-memory opens.
@@ -319,6 +323,27 @@ test("openSource only reads the blocks it needs", () => {
   const wb = Workbook.openSource({ size: big.length, readAt: (o, n) => ((read += n), big.subarray(o, o + n)) });
   assert.deepEqual(wb.sheet("Second").rows(), [["a"], [1]]);
   assert.ok(read < big.length, `read ${read} of ${big.length} bytes`);
+});
+
+test("LazyWorkbook closes its file when the workbook is garbage collected without free()", async () => {
+  const { setFlagsFromString } = await import("node:v8");
+  const { runInNewContext } = await import("node:vm");
+  setFlagsFromString("--expose-gc");
+  const gc = runInNewContext("gc");
+  const { readdirSync } = await import("node:fs");
+  const openFds = () => readdirSync("/dev/fd").length;
+  const before = openFds();
+  (() => {
+    const wb = LazyWorkbook.open(fixturePath("basic.xlsx"));
+    assert.equal(wb.sheets().length, 4);
+  })();
+  assert.equal(openFds(), before + 1);
+  // Two hops: wasm-bindgen frees the Rust workbook, which releases readAt, which closes the file.
+  for (let i = 0; i < 50 && openFds() > before; i++) {
+    gc();
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(openFds(), before);
 });
 
 test("LazyWorkbook leaves a caller's fd open", () => {
