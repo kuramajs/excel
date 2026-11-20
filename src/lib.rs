@@ -114,7 +114,11 @@ impl ChunkReader {
         let got = self
             .src
             .read_at
-            .call2(&JsValue::NULL, &(offset as f64).into(), &(len as f64).into())
+            .call2(
+                &JsValue::NULL,
+                &(offset as f64).into(),
+                &(len as f64).into(),
+            )
             .map_err(|e| {
                 let msg = e
                     .dyn_ref::<js_sys::Error>()
@@ -123,7 +127,9 @@ impl ChunkReader {
                 io::Error::other(format!("READ_FAILED: readAt({offset}, {len}): {msg}"))
             })?;
         if !got.is_instance_of::<Uint8Array>() && !got.is_instance_of::<ArrayBuffer>() {
-            return Err(io::Error::other("readAt must return a Uint8Array or ArrayBuffer"));
+            return Err(io::Error::other(
+                "readAt must return a Uint8Array or ArrayBuffer",
+            ));
         }
         let data: Rc<[u8]> = Uint8Array::new(&got).to_vec().into();
         if data.len() as u64 != len {
@@ -160,7 +166,10 @@ impl Seek for ChunkReader {
             SeekFrom::Current(d) => self.pos as i128 + d as i128,
         };
         if pos < 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before start"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before start",
+            ));
         }
         self.pos = pos as u64;
         Ok(self.pos)
@@ -664,7 +673,10 @@ impl Workbook {
             ));
         };
         if !(size >= 0.0 && size.fract() == 0.0) {
-            return Err(error("INVALID_INPUT", "size must be a non-negative integer"));
+            return Err(error(
+                "INVALID_INPUT",
+                "size must be a non-negative integer",
+            ));
         }
         Workbook::from_bytes(Bytes::Lazy(ChunkReader {
             src: Rc::new(LazySource {
