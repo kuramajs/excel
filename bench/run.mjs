@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const runs = Number(process.argv[2] ?? 3);
 const files = ["1mb", "10mb", "50mb"].map((f) => `fixtures/${f}.xlsx`);
-const cases = ["kurama rows()", "kurama iterRows()", "kurama forEachRow()", "sheetjs", "exceljs", "exceljs stream"];
+const cases = ["kurama rows()", "kurama iterRows()", "kurama forEachRow()", "kurama lazy forEachRow()", "sheetjs", "exceljs", "exceljs stream"];
 
 function runCase(name, file) {
   try {

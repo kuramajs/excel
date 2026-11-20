@@ -1,10 +1,13 @@
 // Compiled by `npm run test:types` with a minimal lib and no skipLibCheck, as a strict consumer would.
-import init, { Workbook, type Cell } from "@kuramajs/excel";
+import init, { Workbook, LazyWorkbook, type Cell, type ByteSource } from "@kuramajs/excel";
 
 await init();
 const wb = Workbook.open(new Uint8Array(0));
 export const row: Cell[] = wb.sheet("Data", { onProgress: (read, total) => void (read / total) }).row(0);
 export const objects: Record<string, Cell>[] = wb.sheet("Data").toObjects({ header: 0 });
+export const lazy: Workbook = LazyWorkbook.open("book.xlsx");
+const source: ByteSource = { size: 0, readAt: () => new Uint8Array(0) };
+export const fromSource: Workbook = Workbook.openSource(source);
 using disposable = wb;
 export { disposable };
 

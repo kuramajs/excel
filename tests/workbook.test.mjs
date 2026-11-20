@@ -1,9 +1,12 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, openSync, closeSync, fstatSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 // Import by package name so tests go through the package.json "exports" map
-import init, { Workbook } from "@kuramajs/excel";
+import init, { Workbook, LazyWorkbook } from "@kuramajs/excel";
+import { writeXlsx } from "@kuramajs/excel/writer";
 
 await init();
 const bytes = readFileSync(new URL("./fixtures/basic.xlsx", import.meta.url));
@@ -259,4 +262,103 @@ test("CommonJS require exposes the same API", () => {
   const cjs = createRequire(import.meta.url)("@kuramajs/excel");
   const wb = cjs.Workbook.open(bytes);
   assert.equal(wb.sheets().length, 4);
+});
+
+// Everything a caller can read from a workbook, for comparing lazy against in-memory opens.
+function dump(wb) {
+  return wb.sheets().map(({ name }) => {
+    const sheet = wb.sheet(name);
+    const streamed = [];
+    wb.forEachRow(name, (row) => void streamed.push(row));
+    return { name, rows: sheet.rows(), iter: [...wb.iterRows(name)], streamed };
+  });
+}
+
+const fixturePath = (name) => new URL(`./fixtures/${name}`, import.meta.url).pathname;
+const csvText = "name,age\nAnn,30\nBob,41\n";
+const tmp = mkdtempSync(join(tmpdir(), "kurama-lazy-"));
+after(() => rmSync(tmp, { recursive: true, force: true }));
+writeFileSync(join(tmp, "small.csv"), csvText);
+// > 1 MB block size, so reads cross blocks and the block cache gets used
+const bigRows = Array.from({ length: 150_000 }, (_, i) => ({ id: i, name: `row ${i} ${"x".repeat(20)}`, v: i / 7 }));
+writeFileSync(join(tmp, "big.xlsx"), writeXlsx({ Big: bigRows, Second: [{ a: 1 }] }));
+
+for (const path of [
+  ...["basic.xlsx", "bad_dimension.xlsx", "date.ods", "date.xls", "date_1904.xls", "date.xlsb"].map(fixturePath),
+  join(tmp, "small.csv"),
+  join(tmp, "big.xlsx"),
+]) {
+  test(`LazyWorkbook reads ${path.split("/").pop()} like Workbook.open`, () => {
+    const lazy = LazyWorkbook.open(path);
+    try {
+      assert.deepEqual(dump(lazy), dump(Workbook.open(readFileSync(path))));
+    } finally {
+      lazy[Symbol.dispose]();
+    }
+  });
+}
+
+test("LazyWorkbook keeps password errors and validates the source", () => {
+  assert.throws(() => LazyWorkbook.open(fixturePath("pass_protected.xlsx")), (e) => e.code === "PASSWORD_PROTECTED");
+  assert.throws(() => Workbook.openSource({}), (e) => e.code === "INVALID_INPUT");
+  assert.throws(() => Workbook.openSource({ size: -1, readAt() {} }), (e) => e.code === "INVALID_INPUT");
+});
+
+test("openSource reports a short or failing read as READ_FAILED", () => {
+  const big = readFileSync(join(tmp, "big.xlsx"));
+  const short = { size: big.length + 10, readAt: (o, n) => big.subarray(o, o + n) };
+  assert.throws(() => Workbook.openSource(short), (e) => e.code === "READ_FAILED");
+  const throws = { size: big.length, readAt() { throw new Error("disk gone"); } };
+  assert.throws(() => Workbook.openSource(throws), (e) => e.code === "READ_FAILED" && /disk gone/.test(e.message));
+});
+
+test("openSource only reads the blocks it needs", () => {
+  const big = readFileSync(join(tmp, "big.xlsx"));
+  let read = 0;
+  assert.ok(big.length > 2 << 20, "fixture must span several 1 MB blocks");
+  const wb = Workbook.openSource({ size: big.length, readAt: (o, n) => ((read += n), big.subarray(o, o + n)) });
+  assert.deepEqual(wb.sheet("Second").rows(), [["a"], [1]]);
+  assert.ok(read < big.length, `read ${read} of ${big.length} bytes`);
+});
+
+test("LazyWorkbook leaves a caller's fd open", () => {
+  const fd = openSync(fixturePath("basic.xlsx"), "r");
+  try {
+    LazyWorkbook.open(fd).free();
+    assert.ok(fstatSync(fd).size > 0);
+  } finally {
+    closeSync(fd);
+  }
+});
+
+test("browser LazyWorkbook needs a worker", async () => {
+  const web = await import("../js/web.mjs");
+  assert.throws(() => web.LazyWorkbook.open(new Blob([bytes])), (e) => e.code === "NOT_IN_WORKER");
+});
+
+test("browser LazyWorkbook reads a Blob through FileReaderSync", async () => {
+  const web = await import("../js/web.mjs");
+  await web.default({ module_or_path: readFileSync(new URL("../pkg/web/web_index_bg.wasm", import.meta.url)) });
+  // Node has no sync Blob read, so record each slice's bytes and fake the worker-only FileReaderSync.
+  const blobBytes = new WeakMap();
+  globalThis.FileReaderSync = class {
+    readAsArrayBuffer(blob) {
+      return blobBytes.get(blob);
+    }
+  };
+  const big = readFileSync(join(tmp, "big.xlsx"));
+  const blob = new Blob([big]);
+  const origSlice = Blob.prototype.slice;
+  Blob.prototype.slice = function (a, b) {
+    const part = origSlice.call(this, a, b);
+    blobBytes.set(part, big.buffer.slice(big.byteOffset + a, big.byteOffset + Math.min(b, big.length)));
+    return part;
+  };
+  try {
+    const wb = web.LazyWorkbook.open(blob);
+    assert.deepEqual(wb.sheet("Second").rows(), [["a"], [1]]);
+  } finally {
+    Blob.prototype.slice = origSlice;
+    delete globalThis.FileReaderSync;
+  }
 });

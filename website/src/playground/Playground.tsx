@@ -5,7 +5,7 @@ import { cellKind, columnName, formatBytes, formatMs, type CellKind } from "./ce
 import { NUM_FMTS, extent, isFormula, key, parseInput, type BookSheet, type Edit, type Fmt } from "./edits";
 import type { Cell, ExportFormat, Progress, SheetInfo, ViewerRequest, ViewerResponse } from "./protocol";
 
-type Opened = { sheets: SheetInfo[]; size: number; readMs: number; openMs: number };
+type Opened = { sheets: SheetInfo[]; size: number; readMs: number; openMs: number; lazy: boolean };
 /** The file's sheet loaded in the worker (all zero for a new blank sheet). */
 type Base = { height: number; width: number; parseMs: number };
 type LogEntry = { id: number; call: string; detail: string };
@@ -61,6 +61,7 @@ export default function Playground() {
   const [pages, setPages] = useState(new Map<number, Cell[][]>());
   const [progress, setProgress] = useState<Progress | null>(null);
   const [memory, setMemory] = useState(0);
+  const [lazy, setLazy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Selection | null>(null);
   const [lastSlice, setLastSlice] = useState<[number, number]>([0, PAGE]);
@@ -83,7 +84,7 @@ export default function Playground() {
           setProgress(null);
           setMemory(data.memory);
           setOpened(data);
-          addLog("Workbook.open(bytes)", `${formatMs(data.openMs)} · ${data.sheets.length} sheets`);
+          addLog(data.lazy ? "LazyWorkbook.open(file)" : "Workbook.open(bytes)", `${formatMs(data.openMs)} · ${data.sheets.length} sheets`);
           // ponytail: hidden sheets are left out of the editable book (and the export)
           const sheets = data.sheets
             .filter((s) => s.visibility === "Visible")
@@ -158,7 +159,7 @@ export default function Playground() {
     reset();
     setFile(f);
     fileName.current = f.name.replace(/\.[^.]+$/, "") || "workbook";
-    send({ type: "open", file: f });
+    send({ type: "open", file: f, lazy });
   }
 
   function newWorkbook() {
@@ -294,11 +295,16 @@ export default function Playground() {
           <button className="codebtn" disabled={busy} onClick={newWorkbook}>
             ＋ New
           </button>
+          <label className="badge" title="Read the file in 1 MB pieces instead of loading it all (LazyWorkbook)">
+            <input type="checkbox" checked={lazy} disabled={busy} onChange={(e) => setLazy(e.target.checked)} /> Lazy open
+          </label>
           {opened && (
             <>
-              <span className="badge">
-                Read <b>{formatMs(opened.readMs)}</b>
-              </span>
+              {!opened.lazy && (
+                <span className="badge">
+                  Read <b>{formatMs(opened.readMs)}</b>
+                </span>
+              )}
               <span className="badge">
                 Open <b>{formatMs(opened.openMs)}</b>
               </span>
