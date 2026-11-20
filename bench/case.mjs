@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const [name, file] = process.argv.slice(2);
-const buf = readFileSync(file);
+const buf = name.includes("lazy") ? null : readFileSync(file); // lazy cases never load the file
 
 const cases = {
   noop: async () => 0,
@@ -24,6 +24,13 @@ const cases = {
   "kurama forEachRow()": async () => {
     const { Workbook } = require(process.env.EK_PKG ?? "../pkg/nodejs/nodejs_index.js");
     const wb = Workbook.open(buf);
+    let n = 0;
+    wb.forEachRow(wb.sheets()[0].name, () => { n++; });
+    return n;
+  },
+  "kurama lazy forEachRow()": async () => {
+    const { LazyWorkbook } = await import(process.env.EK_PKG ?? "../js/node.mjs");
+    const wb = LazyWorkbook.open(file);
     let n = 0;
     wb.forEachRow(wb.sheets()[0].name, () => { n++; });
     return n;

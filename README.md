@@ -65,6 +65,28 @@ wb.forEachRow("Data", (row, index) => {
 
 Streaming is low-memory for xlsx and xlsm. Other formats are loaded fully first, then streamed.
 
+## Opening big files without loading them
+
+`Workbook.open(bytes)` copies the whole file into wasm memory. `LazyWorkbook.open` reads it in 1 MB pieces as needed (about 8 MB cached at once) and returns a normal `Workbook`:
+
+```js
+// Web Worker: pass the File from <input type="file"> or a drop event
+import init, { LazyWorkbook } from "@kuramajs/excel";
+await init();
+self.onmessage = ({ data: file }) => {
+  const wb = LazyWorkbook.open(file);
+  wb.forEachRow(wb.sheets()[0].name, (row) => { /* ... */ });
+  wb.free();
+};
+
+// Node: a path (closed on free()) or an fd you opened (you close it)
+const wb = LazyWorkbook.open("big.xlsx");
+```
+
+The browser version needs a Web Worker, because it reads the `File` synchronously with `FileReaderSync`. On the main thread it throws `NOT_IN_WORKER`; use `Workbook.open(await file.arrayBuffer())` there instead. For any other storage, pass your own synchronous reader: `Workbook.openSource({ size, readAt(offset, length) })`.
+
+xlsx, xlsm and xlsb benefit most: only the parts being read are fetched. On a 47 MB xlsx, `forEachRow` peaks at 164 MB RSS instead of 280 MB, at the same speed. xls, ods and csv work too, but still read their main data stream fully while parsing. Shared strings are always held in memory.
+
 ## CSV
 
 `Workbook.open` also reads CSV. You get one sheet named `"Sheet1"`, and every cell is a string (`null` if empty). Types aren't guessed, so `"01234"` keeps its leading zero. The delimiter (`,` `;` or tab) is picked from the first line. Text is read as UTF-8, or as windows-1252 (what Excel's "CSV" save writes) if it isn't valid UTF-8. Blank lines are skipped.
@@ -178,6 +200,8 @@ Writer errors have a `code` too: `INVALID_INPUT` (a value xlsx can't store, like
 | | |
 |---|---|
 | `Workbook.open(data: Uint8Array \| ArrayBuffer)` | Parse a workbook or CSV. The format is detected from the bytes. |
+| `LazyWorkbook.open(file: Blob \| string \| number)` | Same, reading the file in pieces: a `Blob`/`File` in a Web Worker, or a path or fd in Node. ESM only. |
+| `Workbook.openSource({ size, readAt })` | Same, from your own `readAt(offset, length) => Uint8Array \| ArrayBuffer`, which must be synchronous. |
 | `wb.sheets(): SheetInfo[]` | Worksheets in order: `{ name, visibility: "Visible" \| "Hidden" \| "VeryHidden" }`. Chart sheets are skipped. |
 | `wb.sheet(name, { onProgress? }): Sheet` | Parse one worksheet. |
 | `wb.iterRows(name): Generator<Cell[]>` | Lazily iterate rows. |
@@ -220,6 +244,8 @@ Every thrown error is an `Error` with a `code`:
 | `PASSWORD_PROTECTED` | The workbook is encrypted |
 | `SHEET_NOT_FOUND` | No worksheet has that name |
 | `OUT_OF_BOUNDS` | `row(i)` or the `toObjects` header row is past the end |
+| `NOT_IN_WORKER` | Browser `LazyWorkbook.open` was called outside a Web Worker |
+| `READ_FAILED` | A lazy source's `readAt` threw, or returned fewer bytes than asked (the file changed or `size` is wrong) |
 
 ```js
 try {
@@ -284,6 +310,7 @@ Step-by-step fixes for Vite, Amplify, nginx, S3/CloudFront, Netlify and Vercel: 
 - The reader returns values only: no formulas, styles, merged-cell info or images.
 - The writer writes xlsx only. No charts, images, comments, hyperlinks or rich text yet. Tables always start in column A, and data bars use Excel's older gradient style.
 - `sheet()` and `rows()` hold the whole sheet in memory. Use `iterRows()` or `forEachRow()` for huge sheets.
+- `LazyWorkbook` reads from the file while you use the workbook. Don't change the file until you `free()` it.
 - WebAssembly memory is capped at 4 GB per instance and never shrinks. In practice, about 500 MB xlsx files are the ceiling in a browser tab.
 - `iterRows()` borrows the parsed workbook until it finishes or you `break` out of it. Other calls made in the meantime still work, but they parse the file again, which is slow on big files. Finish or break out of one iterator before using the workbook again.
 - Streamed rows (`iterRows()`, `forEachRow()`) are padded to the widest row seen so far, starting from the size the sheet declares. If a file declares its size wrongly, the first rows can be narrower than in `sheet().rows()`.

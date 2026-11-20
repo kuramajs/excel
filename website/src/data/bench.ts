@@ -11,6 +11,7 @@ export const SIZES: Size[] = [
     rows: "22k rows",
     data: [
       { lib: "kurama", variant: "forEachRow()", s: 0.1, mb: 96, ours: true },
+      { lib: "kurama", variant: "LazyWorkbook forEachRow()", s: 0.11, mb: 95, ours: true },
       { lib: "kurama", variant: "iterRows()", s: 0.1, mb: 89, ours: true },
       { lib: "kurama", variant: "rows()", s: 0.11, mb: 130, ours: true },
       { lib: "exceljs", variant: "stream", s: 0.28, mb: 146 },
@@ -25,6 +26,7 @@ export const SIZES: Size[] = [
     rows: "220k rows",
     data: [
       { lib: "kurama", variant: "forEachRow()", s: 0.73, mb: 127, ours: true },
+      { lib: "kurama", variant: "LazyWorkbook forEachRow()", s: 0.77, mb: 114, ours: true },
       { lib: "kurama", variant: "iterRows()", s: 0.72, mb: 126, ours: true },
       { lib: "kurama", variant: "rows()", s: 0.76, mb: 379, ours: true },
       { lib: "exceljs", variant: "stream", s: 1.71, mb: 327 },
@@ -39,6 +41,7 @@ export const SIZES: Size[] = [
     rows: "1M rows",
     data: [
       { lib: "kurama", variant: "forEachRow()", s: 3.41, mb: 282, ours: true },
+      { lib: "kurama", variant: "LazyWorkbook forEachRow()", s: 3.53, mb: 164, ours: true },
       { lib: "kurama", variant: "iterRows()", s: 3.37, mb: 276, ours: true },
       { lib: "kurama", variant: "rows()", s: 3.55, mb: 1326, ours: true },
       { lib: "exceljs", variant: "stream", s: 7.51, mb: 730 },

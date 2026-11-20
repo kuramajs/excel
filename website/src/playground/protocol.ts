@@ -4,7 +4,7 @@ import type { Edits } from "./edits";
 export type { Cell, SheetInfo };
 
 export type ViewerRequest =
-  | { type: "open"; file: File }
+  | { type: "open"; file: File; lazy: boolean }
   | { type: "sheet"; name: string }
   | { type: "rows"; start: number; end: number }
   | { type: "export"; format: ExportFormat; sheets: ExportSheet[] };
@@ -20,14 +20,14 @@ export type Progress =
 
 export type ViewerResponse =
   | { type: "progress"; progress: Progress }
-  | { type: "opened"; sheets: SheetInfo[]; size: number; readMs: number; openMs: number; memory: number }
+  | { type: "opened"; sheets: SheetInfo[]; size: number; readMs: number; openMs: number; memory: number; lazy: boolean }
   | { type: "sheet"; name: string; height: number; width: number; parseMs: number; memory: number }
   | { type: "rows"; start: number; end: number; rows: Cell[][]; ms: number }
   | { type: "exported"; format: ExportFormat; bytes: Uint8Array; rows: number; ms: number }
   | { type: "error"; code?: string; message: string };
 
-export type BenchLib = "kurama rows()" | "kurama forEachRow()" | "sheetjs" | "exceljs";
-export const BENCH_LIBS: BenchLib[] = ["kurama rows()", "kurama forEachRow()", "sheetjs", "exceljs"];
+export type BenchLib = "kurama rows()" | "kurama forEachRow()" | "kurama lazy forEachRow()" | "sheetjs" | "exceljs";
+export const BENCH_LIBS: BenchLib[] = ["kurama rows()", "kurama forEachRow()", "kurama lazy forEachRow()", "sheetjs", "exceljs"];
 
 export type BenchRequest =
   | { type: "list"; file: File }

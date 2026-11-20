@@ -1,13 +1,15 @@
 /// <reference lib="webworker" />
 // Times parse + reading every row of one sheet per library (median of N runs).
-import init, { Workbook } from "@kuramajs/excel";
+import init, { Workbook, LazyWorkbook } from "@kuramajs/excel";
 import * as XLSX from "xlsx";
 import ExcelJS from "exceljs";
 import type { BenchLib, BenchRequest, BenchResponse } from "./protocol";
 
 const post = (msg: BenchResponse) => self.postMessage(msg);
 
-const cases: Record<BenchLib, (buf: Uint8Array, sheet: string) => number | Promise<number>> = {
+// Other cases get the file already in memory; the lazy case reads the File itself, so its time
+// includes reading the parts it needs.
+const cases: Record<BenchLib, (buf: Uint8Array, sheet: string, file: File) => number | Promise<number>> = {
   "kurama rows()": (buf, name) => {
     const wb = Workbook.open(buf);
     const sheet = wb.sheet(name);
@@ -18,6 +20,15 @@ const cases: Record<BenchLib, (buf: Uint8Array, sheet: string) => number | Promi
   },
   "kurama forEachRow()": (buf, name) => {
     const wb = Workbook.open(buf);
+    let n = 0;
+    wb.forEachRow(name, () => {
+      n++;
+    });
+    wb.free();
+    return n;
+  },
+  "kurama lazy forEachRow()": (_buf, name, file) => {
+    const wb = LazyWorkbook.open(file);
     let n = 0;
     wb.forEachRow(name, () => {
       n++;
@@ -57,7 +68,7 @@ self.onmessage = async ({ data }: MessageEvent<BenchRequest>) => {
       let rows = 0;
       for (let i = 0; i < data.runs; i++) {
         const t0 = performance.now();
-        rows = await cases[lib](buf, data.sheet);
+        rows = await cases[lib](buf, data.sheet, data.file);
         times.push(performance.now() - t0);
       }
       times.sort((a, b) => a - b);

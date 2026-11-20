@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 // Holds the parsed workbook/sheet so the page never blocks; the page asks for row windows.
-import init, { Workbook, type Cell, type Sheet } from "@kuramajs/excel";
+import init, { Workbook, LazyWorkbook, type Cell, type Sheet } from "@kuramajs/excel";
 import type { Format, WriteCell } from "@kuramajs/excel/writer";
 import { isFormula, type Edit, type Fmt } from "./edits";
 import type { ExportSheet, Progress, ViewerRequest, ViewerResponse } from "./protocol";
@@ -78,12 +78,15 @@ async function handle(req: ViewerRequest) {
       wb?.free();
       sheet = wb = null;
       const t0 = performance.now();
-      const bytes = await readWithProgress(req.file);
+      // Lazy: no upfront read, the file is fetched in 1 MB pieces as the workbook needs them
+      const bytes = req.lazy ? null : await readWithProgress(req.file);
       const readMs = performance.now() - t0;
       progress({ phase: "open" });
       const t1 = performance.now();
-      wb = Workbook.open(bytes);
-      post({ type: "opened", sheets: wb.sheets(), size: req.file.size, readMs, openMs: performance.now() - t1, memory: memory() });
+      const opened = bytes ? Workbook.open(bytes) : LazyWorkbook.open(req.file);
+      wb = opened;
+      const openMs = performance.now() - t1;
+      post({ type: "opened", sheets: opened.sheets(), size: req.file.size, readMs, openMs, memory: memory(), lazy: req.lazy });
       break;
     }
     case "sheet": {

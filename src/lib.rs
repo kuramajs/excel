@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
 use calamine::{Data, Range, Reader, SheetType, SheetVisible, Sheets};
@@ -14,7 +14,9 @@ export type Visibility = "Visible" | "Hidden" | "VeryHidden";
 export interface SheetInfo { name: string; visibility: Visibility }
 export interface ToObjectsOptions { header?: number }
 export interface SheetOptions { onProgress?: (rowsRead: number, totalRows: number) => void }
-export type ErrorCode = "INVALID_INPUT" | "INVALID_FILE" | "PASSWORD_PROTECTED" | "SHEET_NOT_FOUND" | "OUT_OF_BOUNDS";
+export type ErrorCode = "INVALID_INPUT" | "INVALID_FILE" | "PASSWORD_PROTECTED" | "SHEET_NOT_FOUND" | "OUT_OF_BOUNDS" | "NOT_IN_WORKER" | "READ_FAILED";
+/** Random-access bytes for `Workbook.openSource`. `readAt` must return exactly `length` bytes. */
+export interface ByteSource { size: number; readAt: (offset: number, length: number) => Uint8Array | ArrayBuffer }
 export interface ExcelKitError extends Error { code: ErrorCode }
 "#;
 
@@ -24,7 +26,155 @@ fn error(code: &str, message: &str) -> JsValue {
     err.into()
 }
 
-type Bytes = Cursor<Rc<[u8]>>;
+/// What calamine reads from: the whole file in memory, or a JS `readAt` callback read in blocks.
+#[derive(Clone)]
+enum Bytes {
+    Mem(Cursor<Rc<[u8]>>),
+    Lazy(ChunkReader),
+}
+
+impl Bytes {
+    fn len(&self) -> u64 {
+        match self {
+            Bytes::Mem(c) => c.get_ref().len() as u64,
+            Bytes::Lazy(r) => r.src.size,
+        }
+    }
+
+    /// A fresh reader at offset 0 (shares the block cache).
+    fn rewind(&self) -> Bytes {
+        let mut b = self.clone();
+        b.seek(SeekFrom::Start(0)).unwrap_throw();
+        b
+    }
+
+    /// Bytes `0..len` (clamped). Free for in-memory input; a fresh read for lazy input.
+    fn head(&self, len: u64) -> Result<Rc<[u8]>, JsValue> {
+        let len = len.min(self.len());
+        if let Bytes::Mem(c) = self {
+            if len == self.len() {
+                return Ok(c.get_ref().clone());
+            }
+            return Ok(c.get_ref()[..len as usize].into());
+        }
+        let mut out = vec![0; len as usize];
+        self.rewind()
+            .read_exact(&mut out)
+            .map_err(|e| error("READ_FAILED", &e.to_string()))?;
+        Ok(out.into())
+    }
+}
+
+impl Read for Bytes {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Bytes::Mem(c) => c.read(buf),
+            Bytes::Lazy(r) => r.read(buf),
+        }
+    }
+}
+
+impl Seek for Bytes {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        match self {
+            Bytes::Mem(c) => c.seek(to),
+            Bytes::Lazy(r) => r.seek(to),
+        }
+    }
+}
+
+const BLOCK: u64 = 1 << 20;
+const CACHED_BLOCKS: usize = 8;
+
+struct LazySource {
+    size: u64,
+    read_at: Function,
+    /// Most recently used first. ponytail: linear scan, fine for 8 entries.
+    cache: RefCell<Vec<(u64, Rc<[u8]>)>>,
+}
+
+/// `Read + Seek` over `readAt(offset, length)`, fetched in 1 MB blocks with a small LRU,
+/// so at most ~8 MB of the file sits in wasm memory at once.
+#[derive(Clone)]
+struct ChunkReader {
+    src: Rc<LazySource>,
+    pos: u64,
+}
+
+impl ChunkReader {
+    fn block(&self, index: u64) -> io::Result<Rc<[u8]>> {
+        let mut cache = self.src.cache.borrow_mut();
+        if let Some(i) = cache.iter().position(|(b, _)| *b == index) {
+            let hit = cache.remove(i);
+            cache.insert(0, hit.clone());
+            return Ok(hit.1);
+        }
+        let offset = index * BLOCK;
+        let len = BLOCK.min(self.src.size - offset);
+        let got = self
+            .src
+            .read_at
+            .call2(
+                &JsValue::NULL,
+                &(offset as f64).into(),
+                &(len as f64).into(),
+            )
+            .map_err(|e| {
+                let msg = e
+                    .dyn_ref::<js_sys::Error>()
+                    .map(|e| String::from(e.message()))
+                    .unwrap_or_else(|| "threw".into());
+                io::Error::other(format!("READ_FAILED: readAt({offset}, {len}): {msg}"))
+            })?;
+        if !got.is_instance_of::<Uint8Array>() && !got.is_instance_of::<ArrayBuffer>() {
+            return Err(io::Error::other(
+                "readAt must return a Uint8Array or ArrayBuffer",
+            ));
+        }
+        let data: Rc<[u8]> = Uint8Array::new(&got).to_vec().into();
+        if data.len() as u64 != len {
+            return Err(io::Error::other(format!(
+                "READ_FAILED: readAt({offset}, {len}) returned {} bytes; the file changed or is shorter than `size`",
+                data.len()
+            )));
+        }
+        cache.insert(0, (index, data.clone()));
+        cache.truncate(CACHED_BLOCKS);
+        Ok(data)
+    }
+}
+
+impl Read for ChunkReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.src.size || buf.is_empty() {
+            return Ok(0);
+        }
+        let block = self.block(self.pos / BLOCK)?;
+        let start = (self.pos % BLOCK) as usize;
+        let n = buf.len().min(block.len() - start);
+        buf[..n].copy_from_slice(&block[start..start + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for ChunkReader {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(p) => p as i128,
+            SeekFrom::End(d) => self.src.size as i128 + d as i128,
+            SeekFrom::Current(d) => self.pos as i128 + d as i128,
+        };
+        if pos < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before start",
+            ));
+        }
+        self.pos = pos as u64;
+        Ok(self.pos)
+    }
+}
 
 fn error_code(e: &calamine::Error) -> &'static str {
     use calamine::{Error as E, OdsError, XlsError, XlsbError, XlsxError};
@@ -37,6 +187,8 @@ fn error_code(e: &calamine::Error) -> &'static str {
         | E::Xls(XlsError::WorksheetNotFound(_))
         | E::Xlsb(XlsbError::WorksheetNotFound(_))
         | E::Ods(OdsError::WorksheetNotFound(_)) => "SHEET_NOT_FOUND",
+        // ponytail: calamine wraps our io::Error in format-specific variants, so match the marker text
+        _ if e.to_string().contains("READ_FAILED") => "READ_FAILED",
         _ => "INVALID_FILE",
     }
 }
@@ -47,9 +199,9 @@ fn calamine_error(e: calamine::Error) -> JsValue {
 
 /// Same detection order as calamine's `open_workbook_auto_from_rs`, but keeps
 /// password errors instead of collapsing everything into "Cannot detect file format".
-fn open_any(bytes: &Rc<[u8]>) -> Result<Sheets<Bytes>, JsValue> {
+fn open_any(bytes: &Bytes) -> Result<Sheets<Bytes>, JsValue> {
     use calamine::{open_workbook_from_rs as open, Error as E, Ods, Xls, Xlsb, Xlsx};
-    let c = || Cursor::new(bytes.clone());
+    let c = || bytes.rewind();
     let errors: [E; 4] = [
         match open::<Xls<_>, _>(c()) {
             Ok(b) => return Ok(Sheets::Xls(b)),
@@ -70,7 +222,7 @@ fn open_any(bytes: &Rc<[u8]>) -> Result<Sheets<Bytes>, JsValue> {
     ];
     match errors
         .into_iter()
-        .find(|e| error_code(e) == "PASSWORD_PROTECTED")
+        .find(|e| matches!(error_code(e), "PASSWORD_PROTECTED" | "READ_FAILED"))
     {
         Some(e) => Err(calamine_error(e)),
         None => Err(error(
@@ -451,12 +603,32 @@ pub struct Workbook {
     /// Where that iterator returns the xlsx when it finishes or is freed
     returned: Mailbox,
     sheet_list: Vec<(String, &'static str)>,
-    bytes: Rc<[u8]>,
+    bytes: Bytes,
     /// CSV input: `book` stays `None` and each call parses `bytes` again (one sheet, cheap to redo)
     csv: bool,
 }
 
 impl Workbook {
+    fn from_bytes(bytes: Bytes) -> Result<Workbook, JsValue> {
+        if looks_like_csv(&bytes.head(8192)?) {
+            return Ok(Workbook {
+                sheet_list: vec![(CSV_SHEET.to_owned(), "Visible")],
+                book: None,
+                returned: Mailbox::default(),
+                bytes,
+                csv: true,
+            });
+        }
+        let book = open_any(&bytes)?;
+        Ok(Workbook {
+            sheet_list: sheet_list(&book),
+            book: Some(book),
+            returned: Mailbox::default(),
+            bytes,
+            csv: false,
+        })
+    }
+
     /// The parsed workbook. If an iterator still holds it, take it back when it has been returned,
     /// otherwise parse the bytes again (only when iterators overlap with other calls).
     fn book(&mut self) -> Result<&mut Sheets<Bytes>, JsValue> {
@@ -481,23 +653,39 @@ impl Workbook {
             return Err(error("INVALID_INPUT", "Expected Uint8Array or ArrayBuffer"));
         }
         let bytes: Rc<[u8]> = Uint8Array::new(&data).to_vec().into();
-        if looks_like_csv(&bytes) {
-            return Ok(Workbook {
-                sheet_list: vec![(CSV_SHEET.to_owned(), "Visible")],
-                book: None,
-                returned: Mailbox::default(),
-                bytes,
-                csv: true,
-            });
+        Workbook::from_bytes(Bytes::Mem(Cursor::new(bytes)))
+    }
+
+    /// Open from random-access bytes without holding the whole file: `readAt(offset, length)` is
+    /// called for 1 MB blocks as needed (about 8 MB cached). Every format and method works.
+    /// xlsx/xlsm/xlsb gain the most; xls, ods and csv still read their main stream fully when parsed.
+    /// Prefer `LazyWorkbook.open(file)`, which builds the source for a Blob or a Node file.
+    #[wasm_bindgen(js_name = openSource)]
+    pub fn open_source(
+        #[wasm_bindgen(unchecked_param_type = "ByteSource")] source: Object,
+    ) -> Result<Workbook, JsValue> {
+        let size = Reflect::get(&source, &"size".into())?.as_f64();
+        let read_at = Reflect::get(&source, &"readAt".into())?.dyn_into::<Function>();
+        let (Some(size), Ok(read_at)) = (size, read_at) else {
+            return Err(error(
+                "INVALID_INPUT",
+                "Expected { size: number, readAt(offset, length) }",
+            ));
+        };
+        if !(size >= 0.0 && size.fract() == 0.0) {
+            return Err(error(
+                "INVALID_INPUT",
+                "size must be a non-negative integer",
+            ));
         }
-        let book = open_any(&bytes)?;
-        Ok(Workbook {
-            sheet_list: sheet_list(&book),
-            book: Some(book),
-            returned: Mailbox::default(),
-            bytes,
-            csv: false,
-        })
+        Workbook::from_bytes(Bytes::Lazy(ChunkReader {
+            src: Rc::new(LazySource {
+                size: size as u64,
+                read_at,
+                cache: RefCell::default(),
+            }),
+            pos: 0,
+        }))
     }
 
     /// Worksheets in workbook order. Chart sheets are skipped.
@@ -530,7 +718,7 @@ impl Workbook {
         };
         if self.csv {
             return Ok(Sheet {
-                range: csv_sheet(&self.bytes, name)?,
+                range: csv_sheet(&self.bytes.head(u64::MAX)?, name)?,
             });
         }
         let range = match (self.book()?, on_progress) {
@@ -549,14 +737,14 @@ impl Workbook {
     #[wasm_bindgen(js_name = iterRows, unchecked_return_type = "Generator<Cell[], void, undefined>")]
     pub fn iter_rows(&mut self, name: &str) -> Result<JsValue, JsValue> {
         let source = if self.csv {
-            RowSource::Loaded(csv_sheet(&self.bytes, name)?, 0)
+            RowSource::Loaded(csv_sheet(&self.bytes.head(u64::MAX)?, name)?, 0)
         } else if matches!(self.book()?, Sheets::Xlsx(_)) {
             // ponytail: `book()` just made sure this is the xlsx, so the fallback never runs. It is kept on
             // purpose: a second caller stops the compiler inlining the xlsx open into `open_any`, which
             // otherwise makes `Workbook::open` touch ~70 MB more memory on a 50 MB file (measured).
             let xlsx = match self.book.take() {
                 Some(Sheets::Xlsx(xlsx)) => xlsx,
-                _ => calamine::open_workbook_from_rs(Cursor::new(self.bytes.clone()))
+                _ => calamine::open_workbook_from_rs(self.bytes.rewind())
                     .map_err(|e: calamine::XlsxError| calamine_error(e.into()))?,
             };
             match XlsxStream::try_new_or_recover(xlsx, |x| x.worksheet_cells_reader(name)) {
@@ -586,7 +774,7 @@ impl Workbook {
         callback: Function,
     ) -> Result<(), JsValue> {
         if self.csv {
-            return emit_range(&callback, &csv_sheet(&self.bytes, name)?);
+            return emit_range(&callback, &csv_sheet(&self.bytes.head(u64::MAX)?, name)?);
         }
         let xlsx = match self.book()? {
             Sheets::Xlsx(xlsx) => xlsx,

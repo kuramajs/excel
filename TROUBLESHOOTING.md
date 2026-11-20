@@ -96,3 +96,7 @@ You still need causes 2 and 3 fixed: the file has to be served as wasm, not HTML
 2. Only in `vite dev`? Add the package to `optimizeDeps.exclude`.
 3. Only when deployed? Check the host's rewrite rule lets `.wasm` through, and that the file is in the deploy output.
 4. Fixed but the browser still fails? Test with `Accept-Encoding: br` and clear the CDN cache.
+
+## `LazyWorkbook.open` throws `NOT_IN_WORKER`
+
+The browser `LazyWorkbook` reads the `File` synchronously with `FileReaderSync`, which only exists in Web Workers. Move the parsing into a worker and `postMessage` the `File` to it (Files can be posted without copying). Or, on the main thread, use `Workbook.open(await file.arrayBuffer())`, which loads the whole file.
